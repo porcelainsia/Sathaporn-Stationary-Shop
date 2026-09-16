@@ -13,7 +13,7 @@
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-app.js";
   import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-auth.js";
   import {
-    getFirestore, doc, getDoc, setDoc, deleteDoc,
+    getFirestore, doc, getDoc, setDoc, deleteDoc, updateDoc, increment,
     collection, getDocs
   } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js";
 
@@ -96,6 +96,37 @@
         return { keys, prefix, shared:true };
       }
       return { keys: [], prefix, shared };
+    }
+  };
+
+  // ---- Per-document product records in `stationary_products`, mirroring ----
+  // ---- the uniform shop's pattern (race-safe stock via Firestore increment). ----
+  function productDocRef(id){ return doc(db, 'stationary_products', id); }
+
+  window.stockApi = {
+    async listProducts(){
+      await readyPromise;
+      const snap = await getDocs(collection(db, 'stationary_products'));
+      const out = [];
+      snap.forEach(d=>out.push(Object.assign({ id: d.id }, d.data())));
+      return out;
+    },
+    async saveProduct(id, data){
+      await readyPromise;
+      await setDoc(productDocRef(id), data, { merge:true });
+    },
+    async deleteProduct(id){
+      await readyPromise;
+      await deleteDoc(productDocRef(id));
+    },
+    async setFields(id, fields){
+      await readyPromise;
+      await updateDoc(productDocRef(id), fields);
+    },
+    async adjustRemaining(id, delta){
+      await readyPromise;
+      if(!delta) return;
+      await updateDoc(productDocRef(id), { remaining: increment(delta) });
     }
   };
 </script>
@@ -473,6 +504,47 @@
   .report-row .rq, .report-head .rq{width:40px; text-align:right; font-family:'IBM Plex Mono',monospace;}
   .report-row .rv, .report-head .rv{width:64px; text-align:right; font-family:'IBM Plex Mono',monospace; font-weight:600;}
   .report-row.report-grand .rv{color:var(--stamp);}
+
+  /* Stock tab: editable quantities + drag-to-reorder */
+  .stock-cat-group{margin-bottom:2px;}
+  .stock-cat-items{display:flex; flex-direction:column;}
+  .stock-cat-items > .stock-row{
+    display:flex; align-items:stretch; gap:8px;
+    background:none; border:none; padding:0; margin-bottom:8px;
+  }
+  .stock-row.dragging{opacity:.5;}
+  .drag-handle{
+    display:flex; align-items:center; justify-content:center; width:26px; flex-shrink:0;
+    color:var(--ink-soft); font-size:16px; cursor:grab; touch-action:none; user-select:none;
+    -webkit-user-select:none;
+  }
+  .drag-handle:active{cursor:grabbing;}
+  .stock-row-body{
+    flex:1; min-width:0; background:#fff; border:1px solid var(--line); border-radius:10px;
+    padding:10px 12px; margin-bottom:8px;
+  }
+  .stock-row-main{display:flex; align-items:center; justify-content:space-between; gap:8px;}
+  .stock-row .fields{display:flex; align-items:flex-end; gap:10px; margin-top:8px;}
+  .stock-row .fields .f{
+    display:flex; flex-direction:column; gap:3px; font-size:11px; color:var(--ink-soft);
+  }
+  .stock-row .fields input{
+    width:64px; font-family:'IBM Plex Mono',monospace; font-size:13px; padding:6px 8px;
+    border:1px solid var(--line); border-radius:7px; background:var(--paper); color:var(--ink);
+  }
+  .stock-row .fields .sold{
+    margin-left:auto; align-self:flex-end; font-size:11.5px; color:var(--ink-soft);
+    font-family:'IBM Plex Mono',monospace;
+  }
+  .stock-row.locked{
+    background:#fff; border:1px solid var(--line); border-radius:10px; padding:11px 14px; margin-bottom:8px;
+    align-items:center; justify-content:space-between;
+  }
+  .stockline{
+    font-family:'IBM Plex Mono',monospace; font-size:11.5px; color:var(--ink-soft); flex-shrink:0;
+  }
+  .stockline.low{color:var(--stamp); font-weight:600;}
+  .stockline.out{color:var(--stamp-dark); font-weight:700;}
 </style>
 </head>
 <body>
@@ -577,15 +649,52 @@ function showToast(msg, longer){
   t._h = setTimeout(()=>t.classList.remove('show'), longer ? 4500 : 1600);
 }
 
-async function loadState(){
+// Loads products from the per-document `stationary_products` collection.
+// On first run ever (collection empty), migrates from the old single-blob
+// 'products' meta key (or the built-in defaults) so no data is lost, seeding
+// received/remaining at 0 — the shop then does a first real stock count via
+// the stock tab.
+async function loadProducts(){
   try{
-    const r = await window.storage.get('products', true);
-    PRODUCTS = r ? JSON.parse(r.value) : JSON.parse(JSON.stringify(DEFAULT_PRODUCTS));
-  }catch(e){ PRODUCTS = JSON.parse(JSON.stringify(DEFAULT_PRODUCTS)); }
+    let list = await window.stockApi.listProducts();
+    if(!list || list.length === 0){
+      let seed;
+      try{
+        const r = await window.storage.get('products', true);
+        seed = r ? JSON.parse(r.value) : JSON.parse(JSON.stringify(DEFAULT_PRODUCTS));
+      }catch(e){ seed = JSON.parse(JSON.stringify(DEFAULT_PRODUCTS)); }
+      const migrated = seed.map((p,idx)=>({
+        id: p.id, name: p.name, price: p.price, cat: p.cat,
+        received: 0, remaining: 0, order: idx
+      }));
+      for(const p of migrated){
+        try{
+          await window.stockApi.saveProduct(p.id, {
+            name: p.name, price: p.price, cat: p.cat,
+            received: p.received, remaining: p.remaining, order: p.order
+          });
+        }catch(e){ console.error('product migration failed for', p.id, e); }
+      }
+      list = migrated;
+    }
+    PRODUCTS = list.map(p=>({
+      id: p.id, name: p.name, price: p.price, cat: p.cat,
+      received: typeof p.received==='number' ? p.received : 0,
+      remaining: typeof p.remaining==='number' ? p.remaining : 0,
+      order: typeof p.order==='number' ? p.order : 0
+    }));
+  }catch(e){
+    console.error('loadProducts failed', e);
+    PRODUCTS = JSON.parse(JSON.stringify(DEFAULT_PRODUCTS)).map((p,idx)=>Object.assign(p, {received:0, remaining:0, order:idx}));
+  }
+  PRODUCTS.sort((a,b)=>(a.order||0)-(b.order||0));
   nextIdCounter = PRODUCTS.reduce((m,p)=>{
     const n = parseInt((p.id||'').replace('p',''),10);
     return isNaN(n) ? m : Math.max(m,n);
   }, 0) + 1;
+}
+async function loadState(){
+  await loadProducts();
   try{
     const r = await window.storage.get('stock_status', true);
     stockStatus = r ? JSON.parse(r.value) : {};
@@ -604,10 +713,6 @@ async function loadState(){
     const r = await window.storage.get('known_names', true);
     knownNames = r ? JSON.parse(r.value) : [];
   }catch(e){ knownNames = []; }
-}
-async function saveProducts(){
-  try{ await window.storage.set('products', JSON.stringify(PRODUCTS), true); }
-  catch(e){ showToast('บันทึกรายการสินค้าไม่สำเร็จ'); }
 }
 async function saveStock(){
   try{ await window.storage.set('stock_status', JSON.stringify(stockStatus), true); }
@@ -634,6 +739,25 @@ async function appendTransaction(sale){
 }
 
 function isOut(id){ return stockStatus[id] === false; }
+
+// Reconciles stock ("คงเหลือ") for the difference between a sale's items
+// before and after an operation — checkout is reconcileStockDeltas([], items),
+// a full delete is reconcileStockDeltas(items, []), and an item-level edit is
+// reconcileStockDeltas(originalItems, finalItems). Uses Firestore increment()
+// so concurrent edits from other devices stay race-safe.
+async function reconcileStockDeltas(beforeItems, afterItems){
+  const before = {}; (beforeItems||[]).forEach(i=>{ before[i.id] = (before[i.id]||0) + i.qty; });
+  const after = {}; (afterItems||[]).forEach(i=>{ after[i.id] = (after[i.id]||0) + i.qty; });
+  const ids = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for(const id of ids){
+    const delta = (before[id]||0) - (after[id]||0);
+    if(!delta) continue;
+    const p = PRODUCTS.find(x=>x.id===id);
+    if(p) p.remaining = (typeof p.remaining==='number' ? p.remaining : 0) + delta;
+    try{ await window.stockApi.adjustRemaining(id, delta); }
+    catch(e){ console.error('stock reconcile failed for', id, e); }
+  }
+}
 
 function renderSell(){
   const el = document.getElementById('tab-sell');
@@ -723,6 +847,7 @@ function renderSell(){
     if(ok){
       transactions.push(sale);
       cart = {};
+      await reconcileStockDeltas([], items);
       showToast('บันทึกการขายแล้ว ✓');
     }
     renderSell();
@@ -936,9 +1061,11 @@ function renderSummary(){
   el.querySelectorAll('[data-sale]').forEach(b=>b.addEventListener('click', ()=>{
     const id = b.dataset.sale;
     openConfirm('ยืนยันการลบ', 'ลบรายการขายนี้ทั้งหมด? การลบนี้ย้อนกลับไม่ได้', async ()=>{
+      const delTx = transactions.find(x=>x.id===id);
       try{
         await window.storage.delete('sale:'+id, true);
         transactions = transactions.filter(t=>t.id!==id);
+        if(delTx) await reconcileStockDeltas(delTx.items, []);
         showToast('ลบแล้ว ✓');
       }catch(e){
         showToast('ลบไม่สำเร็จ: ' + (e && e.message ? e.message : 'ไม่ทราบสาเหตุ'), true);
@@ -983,15 +1110,18 @@ function renderSummary(){
       const t = transactions.find(x=>x.id===editingSaleId);
       if(!t) return;
       const finalItems = editingSaleItems.filter(i=>i.qty>0);
+      const originalItems = t.items;
       try{
         if(finalItems.length === 0){
           await window.storage.delete('sale:'+t.id, true);
           transactions = transactions.filter(x=>x.id!==t.id);
+          await reconcileStockDeltas(originalItems, []);
           showToast('ลบรายการแล้ว (ไม่มีสินค้าเหลือ) ✓');
         } else {
           t.items = finalItems;
           t.total = finalItems.reduce((s,i)=>s+i.qty*i.price,0);
           await window.storage.set('sale:'+t.id, JSON.stringify(t), true);
+          await reconcileStockDeltas(originalItems, finalItems);
           showToast('บันทึกการแก้ไขแล้ว ✓');
         }
       }catch(e){
@@ -1013,6 +1143,8 @@ async function clearTransactionsByDate(dateKey){
   }catch(e){}
   const deleteIds = new Set(toDelete.map(t=>t.id));
   transactions = transactions.filter(t=>!deleteIds.has(t.id));
+  const allItems = toDelete.reduce((acc,t)=>acc.concat(t.items||[]), []);
+  await reconcileStockDeltas(allItems, []);
   editDataMode = false;
   showToast('ลบข้อมูลแล้ว ✓');
   renderSummary();
@@ -1313,6 +1445,57 @@ function openExportModal(dateKeyOrKeys){
   });
 }
 
+// Dependency-free, touch-and-mouse drag-to-reorder for the admin stock list.
+// Scoped per category: a dragged row is only ever moved within its own
+// `.stock-cat-items` container, so items can't be dragged into another
+// category. On drop, persists the new `order` field for that category's
+// items to Firestore.
+function wireDragReorder(root){
+  root.querySelectorAll('.stock-cat-items').forEach(list=>{
+    list.querySelectorAll('.drag-handle').forEach(handle=>{
+      handle.addEventListener('pointerdown', (e)=>{
+        const row = handle.closest('.stock-row');
+        if(!row) return;
+        e.preventDefault();
+        row.classList.add('dragging');
+        try{ handle.setPointerCapture(e.pointerId); }catch(err){}
+
+        const onMove = (ev)=>{
+          const y = ev.clientY;
+          const rows = [...list.querySelectorAll('.stock-row')].filter(r=>r!==row);
+          let target = null;
+          for(const r of rows){
+            const rect = r.getBoundingClientRect();
+            if(y < rect.top + rect.height/2){ target = r; break; }
+          }
+          if(target){
+            if(row.nextElementSibling !== target) list.insertBefore(row, target);
+          } else if(list.lastElementChild !== row){
+            list.appendChild(row);
+          }
+        };
+        const onUp = async ()=>{
+          document.removeEventListener('pointermove', onMove);
+          document.removeEventListener('pointerup', onUp);
+          row.classList.remove('dragging');
+          try{ handle.releasePointerCapture(e.pointerId); }catch(err){}
+          const ids = [...list.querySelectorAll('.stock-row')].map(r=>r.dataset.id);
+          ids.forEach((id, idx)=>{
+            const p = PRODUCTS.find(x=>x.id===id);
+            if(p) p.order = idx;
+          });
+          PRODUCTS.sort((a,b)=>(a.order||0)-(b.order||0));
+          try{
+            await Promise.all(ids.map((id, idx)=> window.stockApi.setFields(id, {order: idx})));
+          }catch(err){ console.error('reorder save failed', err); showToast('บันทึกลำดับไม่สำเร็จ'); }
+        };
+        document.addEventListener('pointermove', onMove);
+        document.addEventListener('pointerup', onUp);
+      });
+    });
+  });
+}
+
 function renderStock(){
   const el = document.getElementById('tab-stock');
 
@@ -1328,8 +1511,10 @@ function renderStock(){
       html += `<div class="cat-label">${cat}</div>`;
       items.forEach(p=>{
         const out = isOut(p.id);
-        html += `<div class="stock-row">
+        const remaining = typeof p.remaining==='number' ? p.remaining : 0;
+        html += `<div class="stock-row locked">
           <div class="info"><div class="n">${p.name}${out?' (หมด)':''}</div><div class="p">฿${p.price}</div></div>
+          <div class="stockline ${out?'out':''}">${out?'หมด':'คงเหลือ '+remaining}</div>
         </div>`;
       });
     });
@@ -1367,7 +1552,7 @@ function renderStock(){
   catOrder().forEach(cat=>{
     const items = PRODUCTS.filter(p=>p.cat===cat);
     if(!items.length) return;
-    html += `<div class="cat-label">${cat}</div>`;
+    html += `<div class="stock-cat-group"><div class="cat-label">${cat}</div><div class="stock-cat-items" data-cat="${cat}">`;
     items.forEach(p=>{
       if(editingId === p.id){
         html += `<div class="add-form">
@@ -1382,16 +1567,30 @@ function renderStock(){
         </div>`;
       } else {
         const on = !isOut(p.id);
-        html += `<div class="stock-row">
-          <div class="info"><div class="n">${p.name}</div><div class="p">฿${p.price}</div></div>
-          <div class="actions2">
-            <div class="icon-btn edit" data-edit="${p.id}">✎</div>
-            <div class="icon-btn del" data-del="${p.id}">🗑</div>
-            <div class="switch ${on?'on':''}" data-id="${p.id}"><div class="knob"></div></div>
+        const received = typeof p.received==='number' ? p.received : 0;
+        const remaining = typeof p.remaining==='number' ? p.remaining : 0;
+        const sold = received - remaining;
+        html += `<div class="stock-row" data-id="${p.id}">
+          <div class="drag-handle" title="ลากเพื่อจัดเรียงลำดับ">⠿</div>
+          <div class="stock-row-body">
+            <div class="stock-row-main">
+              <div class="info"><div class="n">${p.name}</div><div class="p">฿${p.price}</div></div>
+              <div class="actions2">
+                <div class="icon-btn edit" data-edit="${p.id}">✎</div>
+                <div class="icon-btn del" data-del="${p.id}">🗑</div>
+                <div class="switch ${on?'on':''}" data-id="${p.id}"><div class="knob"></div></div>
+              </div>
+            </div>
+            <div class="fields">
+              <label class="f"><span>รับเข้า</span><input type="number" min="0" data-field="received" data-id="${p.id}" value="${received}"></label>
+              <label class="f"><span>คงเหลือ</span><input type="number" min="0" data-field="remaining" data-id="${p.id}" value="${remaining}"></label>
+              <div class="sold">ขายแล้ว ${sold}</div>
+            </div>
           </div>
         </div>`;
       }
     });
+    html += `</div></div>`;
   });
   el.innerHTML = html;
 
@@ -1411,6 +1610,32 @@ function renderStock(){
     renderSell();
   }));
 
+  el.querySelectorAll('[data-field]').forEach(inp=>inp.addEventListener('change', async ()=>{
+    const id = inp.dataset.id;
+    const field = inp.dataset.field;
+    const p = PRODUCTS.find(x=>x.id===id);
+    if(!p) return;
+    let val = parseInt(inp.value, 10);
+    if(isNaN(val) || val < 0) val = 0;
+    inp.value = val;
+    try{
+      if(field === 'received'){
+        const delta = val - (p.received||0);
+        p.received = val;
+        p.remaining = Math.max(0, (p.remaining||0) + delta);
+        await window.stockApi.setFields(id, {received: val});
+        if(delta) await window.stockApi.adjustRemaining(id, delta);
+      } else if(field === 'remaining'){
+        p.remaining = val;
+        await window.stockApi.setFields(id, {remaining: val});
+      }
+    }catch(e){
+      console.error('stock field save failed', id, field, e);
+      showToast('บันทึกสต็อกไม่สำเร็จ');
+    }
+    renderStock();
+  }));
+
   el.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click', ()=>{
     editingId = b.dataset.edit; showAddForm = false; renderStock();
   }));
@@ -1421,7 +1646,7 @@ function renderStock(){
       PRODUCTS = PRODUCTS.filter(x=>x.id!==id);
       delete cart[id];
       delete stockStatus[id];
-      await saveProducts();
+      try{ await window.stockApi.deleteProduct(id); }catch(e){ console.error('delete product failed', id, e); }
       await saveStock();
       renderStock();
       renderSell();
@@ -1446,8 +1671,11 @@ function renderStock(){
       showToast('กรอกชื่อและราคาให้ถูกต้อง'); return;
     }
     const id = 'p' + (nextIdCounter++);
-    PRODUCTS.push({id, name, price, cat});
-    await saveProducts();
+    const maxOrder = PRODUCTS.reduce((m,p)=>Math.max(m, p.order||0), -1);
+    const newProduct = {id, name, price, cat, received:0, remaining:0, order: maxOrder+1};
+    PRODUCTS.push(newProduct);
+    try{ await window.stockApi.saveProduct(id, {name, price, cat, received:0, remaining:0, order:newProduct.order}); }
+    catch(e){ console.error('add product failed', id, e); showToast('เพิ่มสินค้าไม่สำเร็จ'); }
     showAddForm = false;
     showToast('เพิ่มสินค้าแล้ว ✓');
     renderStock();
@@ -1466,12 +1694,15 @@ function renderStock(){
     }
     const p = PRODUCTS.find(x=>x.id===id);
     p.name = name; p.price = price;
-    await saveProducts();
+    try{ await window.stockApi.setFields(id, {name, price}); }
+    catch(e){ console.error('edit product failed', id, e); showToast('บันทึกไม่สำเร็จ'); }
     editingId = null;
     showToast('บันทึกแล้ว ✓');
     renderStock();
     renderSell();
   });
+
+  wireDragReorder(el);
 }
 
 document.querySelectorAll('.tab').forEach(t=>{
