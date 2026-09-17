@@ -317,12 +317,18 @@
     font-family:'IBM Plex Mono',monospace; font-size:10.5px; text-transform:uppercase; letter-spacing:.08em;
     color:var(--teal-dark); margin:12px 0 6px; padding-top:8px; border-top:1px dashed var(--line);
   }
-  .time-log-row{padding:6px 0; border-bottom:1px dotted var(--line);}
+  .time-log-row{padding:6px 0; border-bottom:1px dotted var(--line); position:relative;}
   .time-log-row:last-child{border-bottom:none;}
-  .time-log-row .tl-top{display:flex; justify-content:space-between; font-size:12px;}
+  .time-log-row .tl-top{display:flex; justify-content:space-between; font-size:12px; padding-right:26px;}
   .time-log-row .tl-time{font-family:'IBM Plex Mono',monospace; color:var(--ink); font-weight:600;}
   .time-log-row .tl-seller{color:var(--ink-soft); font-size:11.5px;}
-  .time-log-row .tl-items{font-size:11.5px; color:var(--ink-soft); margin-top:2px;}
+  .time-log-row .tl-items{font-size:11.5px; color:var(--ink-soft); margin-top:2px; padding-right:26px;}
+  .tl-quick-edit{
+    position:absolute; top:4px; right:0; width:22px; height:22px; border-radius:50%;
+    border:1px solid var(--line); background:#fff; color:var(--teal-dark); font-size:11px;
+    cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0;
+  }
+  .tl-quick-edit:active{background:var(--paper-dark);}
   .day-copy-btn{
     width:100%; margin-top:12px; padding:9px; border-radius:8px; border:1px dashed var(--teal);
     background:none; color:var(--teal-dark); font-weight:600; font-size:12px; cursor:pointer;
@@ -902,57 +908,54 @@ function renderSummary(){
     <div class="stat-card"><div class="k">จำนวนอุปกรณ์การเรียนที่ขาย</div><div class="v">${todayOther}</div></div>
   </div>`;
 
-  if(editDataMode){
+  if(editingSaleId){
+    const t = transactions.find(x=>x.id===editingSaleId);
+    const liveTotal = editingSaleItems.reduce((s,i)=>s+i.qty*i.price,0);
+    html += `<div class="edit-mode-note"><span>แก้ไขรายการ — ${t?t.dateLabel:''}</span><button id="cancelSaleEdit">ยกเลิก</button></div>`;
+    html += `<div class="sale-editor">`;
+    html += `<div class="se-time-row"><div style="flex:1;"><label>เวลา</label><input type="text" id="seTime" value="${editingSaleMeta.time}" placeholder="เช่น 13:45"></div></div>`;
+    if(editingSaleItems.length === 0){
+      html += `<div class="empty-note">ไม่มีสินค้าในรายการนี้</div>`;
+    } else {
+      editingSaleItems.forEach(i=>{
+        html += `<div class="cart-row">
+          <span class="cname">${i.name}</span>
+          <span class="qty-ctrl">
+            <button data-se-dec="${i.id}">−</button>
+            <span>${i.qty}</span>
+            <button data-se-inc="${i.id}">+</button>
+          </span>
+          <span class="csub">฿${i.price*i.qty}</span>
+        </div>`;
+      });
+    }
+    html += `<button class="add-item-btn" id="seAddItem" style="margin-top:10px;">+ เพิ่มสินค้า</button>`;
+    html += `<div class="total-row"><span class="label">รวมทั้งสิ้น</span><span class="amount">฿${liveTotal}</span></div>`;
+    html += `<button class="save-btn" id="seSaveEdit">บันทึกการแก้ไข</button>`;
+    html += `</div>`;
+  } else if(editDataMode){
     const dk = editDataMode === '__all__' ? null : editDataMode;
     const scoped = dk ? transactions.filter(t=>t.dateKey===dk) : transactions;
     const label = dk ? (scoped[0] ? scoped[0].dateLabel : dk) : 'ทุกวันที่ผ่านมา';
-
-    if(editingSaleId){
-      const t = transactions.find(x=>x.id===editingSaleId);
-      const liveTotal = editingSaleItems.reduce((s,i)=>s+i.qty*i.price,0);
-      html += `<div class="edit-mode-note"><span>แก้ไขรายการ — ${t?t.dateLabel:''}</span><button id="cancelSaleEdit">ยกเลิก</button></div>`;
-      html += `<div class="sale-editor">`;
-      html += `<div class="se-time-row"><div style="flex:1;"><label>เวลา</label><input type="text" id="seTime" value="${editingSaleMeta.time}" placeholder="เช่น 13:45"></div></div>`;
-      if(editingSaleItems.length === 0){
-        html += `<div class="empty-note">ไม่มีสินค้าในรายการนี้</div>`;
-      } else {
-        editingSaleItems.forEach(i=>{
-          html += `<div class="cart-row">
-            <span class="cname">${i.name}</span>
-            <span class="qty-ctrl">
-              <button data-se-dec="${i.id}">−</button>
-              <span>${i.qty}</span>
-              <button data-se-inc="${i.id}">+</button>
-            </span>
-            <span class="csub">฿${i.price*i.qty}</span>
-          </div>`;
-        });
-      }
-      html += `<button class="add-item-btn" id="seAddItem" style="margin-top:10px;">+ เพิ่มสินค้า</button>`;
-      html += `<div class="total-row"><span class="label">รวมทั้งสิ้น</span><span class="amount">฿${liveTotal}</span></div>`;
-      html += `<button class="save-btn" id="seSaveEdit">บันทึกการแก้ไข</button>`;
-      html += `</div>`;
+    html += `<div class="edit-mode-note"><span>โหมดแก้ไข — ${label}</span><button id="closeEditMode">ปิดโหมดนี้</button></div>`;
+    const sorted = [...scoped].sort((a,b)=> b.ts.localeCompare(a.ts));
+    if(sorted.length===0){
+      html += `<div class="empty-note">ไม่มีรายการขายในวันที่เลือก</div>`;
     } else {
-      html += `<div class="edit-mode-note"><span>โหมดแก้ไข — ${label}</span><button id="closeEditMode">ปิดโหมดนี้</button></div>`;
-      const sorted = [...scoped].sort((a,b)=> b.ts.localeCompare(a.ts));
-      if(sorted.length===0){
-        html += `<div class="empty-note">ไม่มีรายการขายในวันที่เลือก</div>`;
-      } else {
-        sorted.forEach(t=>{
-          const time = t.time || new Date(t.ts).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
-          html += `<div class="sale-entry">
-            <div class="se-top">
-              <span class="se-meta">${t.dateLabel} · ${time}${t.seller?' · '+t.seller:''}</span>
-              <span class="se-total">฿${t.total}</span>
-            </div>
-            <div class="se-items">${t.items.map(i=>`${i.name}×${i.qty}`).join(', ')}</div>
-            <div class="se-actions">
-              <button class="se-editbtn" data-editsale="${t.id}">✎ แก้ไขรายการ</button>
-              <button class="se-del" data-sale="${t.id}">🗑 ลบทั้งหมด</button>
-            </div>
-          </div>`;
-        });
-      }
+      sorted.forEach(t=>{
+        const time = t.time || new Date(t.ts).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+        html += `<div class="sale-entry">
+          <div class="se-top">
+            <span class="se-meta">${t.dateLabel} · ${time}${t.seller?' · '+t.seller:''}</span>
+            <span class="se-total">฿${t.total}</span>
+          </div>
+          <div class="se-items">${t.items.map(i=>`${i.name}×${i.qty}`).join(', ')}</div>
+          <div class="se-actions">
+            <button class="se-editbtn" data-editsale="${t.id}">✎ แก้ไขรายการ</button>
+            <button class="se-del" data-sale="${t.id}">🗑 ลบทั้งหมด</button>
+          </div>
+        </div>`;
+      });
     }
   } else {
     const byDay = {};
@@ -983,10 +986,11 @@ function renderSummary(){
             ${Object.keys(d.items).map(n=>`<div class="day-line"><span>${n} ×${d.items[n].qty}</span><span>฿${d.items[n].sub}</span></div>`).join('')}
             <div class="time-log-label">บันทึกเวลาการขาย</div>
             ${daySales.map(t=>{
-              const time = new Date(t.ts).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+              const time = t.time || new Date(t.ts).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
               const seller = t.seller ? t.seller : 'ไม่ระบุชื่อ';
               const itemsStr = t.items.map(i=>`${i.name}×${i.qty}`).join(', ');
               return `<div class="time-log-row">
+                <button class="tl-quick-edit" data-quickedit="${t.id}" title="แก้ไขรายการนี้">✎</button>
                 <div class="tl-top"><span class="tl-time">${time}</span><span class="tl-seller">${seller}</span></div>
                 <div class="tl-items">${itemsStr}</div>
               </div>`;
@@ -1042,6 +1046,17 @@ function renderSummary(){
     const dk = h.dataset.day;
     openDay = openDay===dk ? null : dk;
     renderSummary();
+  }));
+  el.querySelectorAll('[data-quickedit]').forEach(b=>b.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    const t = transactions.find(x=>x.id===b.dataset.quickedit);
+    if(!t) return;
+    openAdminGate('ใส่รหัสเพื่อแก้ไขข้อมูล', 'ต้องใส่รหัสผู้ดูแลก่อนแก้ไขรายการขาย', ()=>{
+      editingSaleId = t.id;
+      editingSaleItems = t.items.map(i=>({id:i.id, name:i.name, price:i.price, qty:i.qty}));
+      editingSaleMeta = { time: t.time || new Date(t.ts).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}) };
+      renderSummary();
+    });
   }));
   const exp = document.getElementById('exportBtn');
   if(exp) exp.addEventListener('click', ()=>openExportModal(todayKey()));
