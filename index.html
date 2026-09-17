@@ -486,6 +486,12 @@
   .sale-editor{
     background:#fff; border:1px solid var(--line); border-radius:12px; padding:14px 16px 10px;
   }
+  .se-time-row{display:flex; gap:8px; margin-bottom:12px;}
+  .se-time-row label{font-size:11px; color:var(--ink-soft); display:block; margin-bottom:4px;}
+  .se-time-row input{
+    font-family:'IBM Plex Sans Thai',sans-serif; font-size:13.5px; padding:9px 10px;
+    border:1px solid var(--line); border-radius:8px; background:var(--paper); width:100%;
+  }
 
   /* Report table */
   .report-table{
@@ -636,6 +642,7 @@ let adminUnlocked = false;
 let editDataMode = false;
 let editingSaleId = null;
 let editingSaleItems = null;
+let editingSaleMeta = null;   // {time}
 
 const ADMIN_CODE = 'porcelainsia';
 const LOW_STOCK = 5;
@@ -902,10 +909,10 @@ function renderSummary(){
 
     if(editingSaleId){
       const t = transactions.find(x=>x.id===editingSaleId);
-      const time = t ? new Date(t.ts).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}) : '';
       const liveTotal = editingSaleItems.reduce((s,i)=>s+i.qty*i.price,0);
-      html += `<div class="edit-mode-note"><span>แก้ไขรายการ — ${t?t.dateLabel:''} · ${time}</span><button id="cancelSaleEdit">ยกเลิก</button></div>`;
+      html += `<div class="edit-mode-note"><span>แก้ไขรายการ — ${t?t.dateLabel:''}</span><button id="cancelSaleEdit">ยกเลิก</button></div>`;
       html += `<div class="sale-editor">`;
+      html += `<div class="se-time-row"><div style="flex:1;"><label>เวลา</label><input type="text" id="seTime" value="${editingSaleMeta.time}" placeholder="เช่น 13:45"></div></div>`;
       if(editingSaleItems.length === 0){
         html += `<div class="empty-note">ไม่มีสินค้าในรายการนี้</div>`;
       } else {
@@ -932,7 +939,7 @@ function renderSummary(){
         html += `<div class="empty-note">ไม่มีรายการขายในวันที่เลือก</div>`;
       } else {
         sorted.forEach(t=>{
-          const time = new Date(t.ts).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+          const time = t.time || new Date(t.ts).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
           html += `<div class="sale-entry">
             <div class="se-top">
               <span class="se-meta">${t.dateLabel} · ${time}${t.seller?' · '+t.seller:''}</span>
@@ -1095,6 +1102,7 @@ function renderSummary(){
     if(!t) return;
     editingSaleId = t.id;
     editingSaleItems = t.items.map(i=>({id:i.id, name:i.name, price:i.price, qty:i.qty}));
+    editingSaleMeta = { time: t.time || new Date(t.ts).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}) };
     renderSummary();
   }));
 
@@ -1113,11 +1121,15 @@ function renderSummary(){
   }));
   const cancelSaleEdit = document.getElementById('cancelSaleEdit');
   if(cancelSaleEdit) cancelSaleEdit.addEventListener('click', ()=>{
-    editingSaleId = null; editingSaleItems = null; renderSummary();
+    editingSaleId = null; editingSaleItems = null; editingSaleMeta = null; renderSummary();
   });
   const seAddItem = document.getElementById('seAddItem');
   if(seAddItem) seAddItem.addEventListener('click', ()=>{
     openProductPicker(editingSaleItems, ()=>{ renderSummary(); });
+  });
+  const seTime = document.getElementById('seTime');
+  if(seTime) seTime.addEventListener('input', ()=>{
+    if(editingSaleMeta) editingSaleMeta.time = seTime.value;
   });
   const seSaveEdit = document.getElementById('seSaveEdit');
   if(seSaveEdit) seSaveEdit.addEventListener('click', ()=>{
@@ -1135,6 +1147,7 @@ function renderSummary(){
         } else {
           t.items = finalItems;
           t.total = finalItems.reduce((s,i)=>s+i.qty*i.price,0);
+          if(editingSaleMeta && editingSaleMeta.time) t.time = editingSaleMeta.time;
           await window.storage.set('sale:'+t.id, JSON.stringify(t), true);
           await reconcileStockDeltas(originalItems, finalItems);
           showToast('บันทึกการแก้ไขแล้ว ✓');
@@ -1142,7 +1155,7 @@ function renderSummary(){
       }catch(e){
         showToast('บันทึกไม่สำเร็จ: ' + (e && e.message ? e.message : 'ไม่ทราบสาเหตุ'), true);
       }
-      editingSaleId = null; editingSaleItems = null;
+      editingSaleId = null; editingSaleItems = null; editingSaleMeta = null;
       renderSummary();
     });
   });
