@@ -14,7 +14,7 @@
   import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-auth.js";
   import {
     getFirestore, doc, getDoc, setDoc, deleteDoc, updateDoc, increment,
-    collection, getDocs
+    collection, getDocs, addDoc, serverTimestamp, Timestamp
   } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js";
 
   const firebaseConfig = {
@@ -102,6 +102,7 @@
   // ---- Per-document product records in `stationary_products`, mirroring ----
   // ---- the uniform shop's pattern (race-safe stock via Firestore increment). ----
   function productDocRef(id){ return doc(db, 'stationary_products', id); }
+  function restocksCollectionRef(){ return collection(db, 'stationary_restocks'); }
 
   window.stockApi = {
     async listProducts(){
@@ -127,7 +128,44 @@
       await readyPromise;
       if(!delta) return;
       await updateDoc(productDocRef(id), { remaining: increment(delta) });
+    },
+    // Stamps the "last received" time on the product doc (any "รับเข้า" save,
+    // matching or not the previous value), and — when delta is non-zero —
+    // folds in the remaining-stock adjustment in the same write.
+    async markReceived(id, val, delta){
+      await readyPromise;
+      const fields = { received: val, receivedAt: serverTimestamp() };
+      if(delta) fields.remaining = increment(delta);
+      await updateDoc(productDocRef(id), fields);
+    },
+    // One row per stock-receipt event that actually changed the total —
+    // same idea as the sales log, but for restocks. Not surfaced in the UI
+    // yet; this just starts capturing the history from now on.
+    async addRestock(entry){
+      await readyPromise;
+      await addDoc(restocksCollectionRef(), Object.assign({ createdAt: serverTimestamp() }, entry));
     }
+  };
+
+  /* One-off maintenance helper, for the browser console: backdate a stock
+     receipt that was actually counted earlier than whenever this runs —
+     stamps the product's "last received" time AND adds the matching
+     restock-log row, both using the given time instead of "now". e.g.:
+     __backfillRestock('p7', 20, '2026-09-22T14:30:00+07:00') */
+  window.__backfillRestock = async (id, qty, isoTime) => {
+    await readyPromise;
+    const d = new Date(isoTime);
+    const dateKey = new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,10);
+    const timeText = d.toLocaleTimeString('th-TH', {hour:'2-digit', minute:'2-digit'});
+    const snap = await getDoc(productDocRef(id));
+    const p = snap.exists() ? snap.data() : {};
+    await updateDoc(productDocRef(id), { receivedAt: Timestamp.fromDate(d) });
+    await addDoc(restocksCollectionRef(), {
+      date: dateKey, time: timeText, productId: id,
+      name: p.name, cat: p.cat,
+      qty, receivedTotal: p.received||0, createdAt: Timestamp.fromDate(d)
+    });
+    console.log('backfilled restock for', id, '->', qty, 'at', isoTime);
   };
 </script>
 <style>
@@ -348,6 +386,10 @@
   }
   .stock-row .info .n{font-size:13.5px; font-weight:500;}
   .stock-row .info .p{font-family:'IBM Plex Mono',monospace; font-size:11.5px; color:var(--ink-soft);}
+  .stock-row .info .updated{
+    font-family:'IBM Plex Mono',monospace; font-size:9px; color:var(--ink-soft);
+    margin-top:2px; line-height:1.3; white-space:nowrap;
+  }
   .switch{
     width:42px; height:24px; border-radius:20px; background:var(--out); position:relative; cursor:pointer; flex-shrink:0;
     transition:background .15s;
@@ -658,6 +700,19 @@ function stockClass(remaining){
   return '';
 }
 
+const THAI_MONTH_ABBR = ["ม.ค.","ก.พ.","มี.ค.","เม.ย.","พ.ค.","มิ.ย.","ก.ค.","ส.ค.","ก.ย.","ต.ค.","พ.ย.","ธ.ค."];
+/* Formats a Firestore Timestamp (or Date) into a short Thai "last received"
+   label, e.g. "วันนี้ 14:30" for today or "22 ก.ย. 14:30" for an earlier day. */
+function formatUpdatedAt(ts){
+  if(!ts) return '';
+  const d = ts.toDate ? ts.toDate() : new Date(ts);
+  if(isNaN(d.getTime())) return '';
+  const now = new Date();
+  const time = d.toLocaleTimeString('th-TH', {hour:'2-digit', minute:'2-digit'});
+  if(d.toDateString() === now.toDateString()) return `วันนี้ ${time}`;
+  return `${d.getDate()} ${THAI_MONTH_ABBR[d.getMonth()]} ${time}`;
+}
+
 function catOrder(){
   const extra = [...new Set(PRODUCTS.map(p=>p.cat))].filter(c=>!BASE_CATS.includes(c));
   return [...BASE_CATS, ...extra];
@@ -706,7 +761,8 @@ async function loadProducts(){
       id: p.id, name: p.name, price: p.price, cat: p.cat,
       received: typeof p.received==='number' ? p.received : 0,
       remaining: typeof p.remaining==='number' ? p.remaining : 0,
-      order: typeof p.order==='number' ? p.order : 0
+      order: typeof p.order==='number' ? p.order : 0,
+      receivedAt: p.receivedAt || null
     }));
   }catch(e){
     console.error('loadProducts failed', e);
@@ -1617,7 +1673,7 @@ function renderStock(){
           <div class="drag-handle" title="ลากเพื่อจัดเรียงลำดับ">⠿</div>
           <div class="stock-row-body">
             <div class="stock-row-main">
-              <div class="info"><div class="n">${p.name}</div><div class="p">฿${p.price}</div></div>
+              <div class="info"><div class="n">${p.name}</div><div class="p">฿${p.price}</div>${p.receivedAt ? `<div class="updated">${formatUpdatedAt(p.receivedAt)}</div>` : ''}</div>
               <div class="actions2">
                 <div class="icon-btn edit" data-edit="${p.id}">✎</div>
                 <div class="icon-btn del" data-del="${p.id}">🗑</div>
@@ -1666,8 +1722,16 @@ function renderStock(){
         const delta = val - (p.received||0);
         p.received = val;
         p.remaining = Math.max(0, (p.remaining||0) + delta);
-        await window.stockApi.setFields(id, {received: val});
-        if(delta) await window.stockApi.adjustRemaining(id, delta);
+        p.receivedAt = new Date();
+        await window.stockApi.markReceived(id, val, delta);
+        if(delta){
+          try{
+            await window.stockApi.addRestock({
+              date: todayKey(), time: p.receivedAt.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}),
+              productId: id, name: p.name, cat: p.cat, qty: delta, receivedTotal: val
+            });
+          }catch(e){ console.error('restock log failed', id, e); }
+        }
       } else if(field === 'remaining'){
         p.remaining = val;
         await window.stockApi.setFields(id, {remaining: val});
