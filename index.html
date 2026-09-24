@@ -14,7 +14,7 @@
   import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-auth.js";
   import {
     getFirestore, doc, getDoc, setDoc, deleteDoc, updateDoc, increment,
-    collection, getDocs, addDoc, serverTimestamp, Timestamp
+    collection, getDocs, addDoc, serverTimestamp, Timestamp, query, where
   } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js";
 
   const firebaseConfig = {
@@ -129,21 +129,36 @@
       if(!delta) return;
       await updateDoc(productDocRef(id), { remaining: increment(delta) });
     },
-    // Stamps the "last received" time on the product doc (any "รับเข้า" save,
-    // matching or not the previous value), and — when delta is non-zero —
-    // folds in the remaining-stock adjustment in the same write.
-    async markReceived(id, val, delta){
+    // Stamps the "last received" time on the product doc (any restock save),
+    // and — when delta is non-zero — folds in the remaining-stock adjustment
+    // and the denormalized "last restock qty" (shown on the stock tab without
+    // a separate fetch) in the same write.
+    async markReceived(id, val, delta, lastQty){
       await readyPromise;
       const fields = { received: val, receivedAt: serverTimestamp() };
       if(delta) fields.remaining = increment(delta);
+      if(typeof lastQty === 'number') fields.lastRestockQty = lastQty;
       await updateDoc(productDocRef(id), fields);
     },
     // One row per stock-receipt event that actually changed the total —
-    // same idea as the sales log, but for restocks. Not surfaced in the UI
-    // yet; this just starts capturing the history from now on.
+    // same idea as the sales log, but for restocks. Read back by the stock
+    // tab's expandable "restock history" panel.
     async addRestock(entry){
       await readyPromise;
       await addDoc(restocksCollectionRef(), Object.assign({ createdAt: serverTimestamp() }, entry));
+    },
+    // Full restock history for one product, newest first.
+    async listRestocks(id){
+      await readyPromise;
+      const snap = await getDocs(query(restocksCollectionRef(), where('productId', '==', id)));
+      const rows = [];
+      snap.forEach(d=>rows.push(Object.assign({ id: d.id }, d.data())));
+      rows.sort((a, b)=>{
+        const ta = a.createdAt && a.createdAt.toMillis ? a.createdAt.toMillis() : 0;
+        const tb = b.createdAt && b.createdAt.toMillis ? b.createdAt.toMillis() : 0;
+        return tb - ta;
+      });
+      return rows;
     }
   };
 
@@ -596,6 +611,23 @@
     margin-left:auto; align-self:flex-end; font-size:11.5px; color:var(--ink-soft);
     font-family:'IBM Plex Mono',monospace;
   }
+  .stock-row .fields .restock-info{cursor:pointer; user-select:none;}
+  .stock-row .fields .restock-val{
+    display:flex; align-items:center; gap:4px; white-space:nowrap;
+    font-family:'IBM Plex Mono',monospace; font-size:13px; padding:6px 8px;
+    border:1px solid var(--line); border-radius:7px; background:var(--paper); color:var(--ink);
+  }
+  .stock-row .fields .restock-val .chev{font-size:9px; color:var(--ink-soft);}
+  .restock-history{
+    margin-top:8px; padding-top:8px; border-top:1px dashed var(--line);
+    display:flex; flex-direction:column; gap:4px;
+  }
+  .restock-history .rh-row{
+    display:flex; justify-content:space-between; gap:10px;
+    font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--ink-soft);
+  }
+  .restock-history .rh-qty{color:var(--ink); font-weight:600;}
+  .restock-history .rh-loading, .restock-history .rh-empty{font-style:italic;}
   .stock-row.locked{
     background:#fff; border:1px solid var(--line); border-radius:10px; padding:11px 14px; margin-bottom:8px;
     align-items:center; justify-content:space-between;
@@ -694,6 +726,8 @@ let editingSaleMeta = null;   // {time}
 
 const ADMIN_CODE = 'porcelainsia';
 const LOW_STOCK = 5;
+let expandedHistory = {};       // { [productId]: true } — which stock rows have their restock history open
+let restockHistoryCache = {};   // { [productId]: [...] } — fetched rows; absent/undefined = not loaded yet
 function stockClass(remaining){
   if(remaining<=0) return 'out';
   if(remaining<=LOW_STOCK) return 'low';
@@ -711,6 +745,22 @@ function formatUpdatedAt(ts){
   const time = d.toLocaleTimeString('th-TH', {hour:'2-digit', minute:'2-digit'});
   if(d.toDateString() === now.toDateString()) return `วันนี้ ${time}`;
   return `${d.getDate()} ${THAI_MONTH_ABBR[d.getMonth()]} ${time}`;
+}
+
+// Formats a restock log entry's plain "YYYY-MM-DD" date key into a short
+// Thai date label (with Buddhist year, via the th-TH locale), e.g. "22 ก.ย. 2569".
+function formatHistoryDate(dateKey){
+  if(!dateKey) return '';
+  const d = new Date(dateKey+'T00:00:00');
+  if(isNaN(d.getTime())) return dateKey;
+  return d.toLocaleDateString('th-TH', {day:'numeric', month:'short', year:'numeric'});
+}
+
+function renderRestockHistoryHtml(id){
+  const rows = restockHistoryCache[id];
+  if(rows === undefined) return `<div class="rh-row rh-loading">กำลังโหลดประวัติ...</div>`;
+  if(!rows.length) return `<div class="rh-row rh-empty">ยังไม่มีประวัติการรับเข้า</div>`;
+  return rows.map(r=>`<div class="rh-row"><span class="rh-date">${formatHistoryDate(r.date)} ${r.time||''}</span><span class="rh-qty">+${r.qty||0}</span></div>`).join('');
 }
 
 function catOrder(){
@@ -762,7 +812,8 @@ async function loadProducts(){
       received: typeof p.received==='number' ? p.received : 0,
       remaining: typeof p.remaining==='number' ? p.remaining : 0,
       order: typeof p.order==='number' ? p.order : 0,
-      receivedAt: p.receivedAt || null
+      receivedAt: p.receivedAt || null,
+      lastRestockQty: typeof p.lastRestockQty==='number' ? p.lastRestockQty : 0
     }));
   }catch(e){
     console.error('loadProducts failed', e);
@@ -1681,10 +1732,15 @@ function renderStock(){
               </div>
             </div>
             <div class="fields">
-              <label class="f"><span>รับเข้า</span><input type="number" min="0" data-field="received" data-id="${p.id}" value="${received}"></label>
+              <div class="f restock-info" data-hist-toggle="${p.id}">
+                <span>รับเข้าล่าสุด</span>
+                <div class="restock-val">${p.lastRestockQty ? '+'+p.lastRestockQty+' ชิ้น' : '—'}<span class="chev">${expandedHistory[p.id]?'▴':'▾'}</span></div>
+              </div>
+              <label class="f"><span>รับเพิ่ม</span><input type="number" min="0" placeholder="0" data-field="restock-add" data-id="${p.id}" value="0"></label>
               <label class="f"><span>คงเหลือ</span><input type="number" min="0" data-field="remaining" data-id="${p.id}" value="${remaining}"></label>
               <div class="sold">ขายแล้ว ${sold}</div>
             </div>
+            ${expandedHistory[p.id] ? `<div class="restock-history">${renderRestockHistoryHtml(p.id)}</div>` : ''}
           </div>
         </div>`;
       }
@@ -1718,19 +1774,26 @@ function renderStock(){
     if(isNaN(val) || val < 0) val = 0;
     inp.value = val;
     try{
-      if(field === 'received'){
-        const delta = val - (p.received||0);
-        p.received = val;
-        p.remaining = Math.max(0, (p.remaining||0) + delta);
-        p.receivedAt = new Date();
-        await window.stockApi.markReceived(id, val, delta);
-        if(delta){
+      if(field === 'restock-add'){
+        const delta = val;
+        if(delta > 0){
+          const newTotal = (p.received||0) + delta;
+          p.received = newTotal;
+          p.remaining = (p.remaining||0) + delta;
+          p.receivedAt = new Date();
+          p.lastRestockQty = delta;
+          await window.stockApi.markReceived(id, newTotal, delta, delta);
           try{
             await window.stockApi.addRestock({
               date: todayKey(), time: p.receivedAt.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}),
-              productId: id, name: p.name, cat: p.cat, qty: delta, receivedTotal: val
+              productId: id, name: p.name, cat: p.cat, qty: delta, receivedTotal: newTotal
             });
           }catch(e){ console.error('restock log failed', id, e); }
+          delete restockHistoryCache[id];
+          if(expandedHistory[id]){
+            try{ restockHistoryCache[id] = await window.stockApi.listRestocks(id); }
+            catch(e){ console.error('reload restock history failed', id, e); }
+          }
         }
       } else if(field === 'remaining'){
         p.remaining = val;
@@ -1741,6 +1804,17 @@ function renderStock(){
       showToast('บันทึกสต็อกไม่สำเร็จ');
     }
     renderStock();
+  }));
+
+  el.querySelectorAll('[data-hist-toggle]').forEach(t=>t.addEventListener('click', async ()=>{
+    const id = t.dataset.histToggle;
+    expandedHistory[id] = !expandedHistory[id];
+    renderStock();
+    if(expandedHistory[id] && restockHistoryCache[id] === undefined){
+      try{ restockHistoryCache[id] = await window.stockApi.listRestocks(id); }
+      catch(e){ console.error('load restock history failed', id, e); restockHistoryCache[id] = []; }
+      if(expandedHistory[id]) renderStock();
+    }
   }));
 
   el.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click', ()=>{
