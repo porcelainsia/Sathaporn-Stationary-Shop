@@ -299,6 +299,13 @@
     margin-top:22px; background:#fff; border:1px solid var(--line); border-radius:12px;
     padding:14px 16px 10px; box-shadow:0 1px 0 var(--line);
   }
+  /* Pinned to the bottom of the viewport while there are items selected, so
+     checkout stays reachable without scrolling past the whole product grid. */
+  .receipt.pinned{
+    position:fixed; left:0; right:0; bottom:0; margin:0 auto; max-width:480px;
+    max-height:64vh; overflow-y:auto; border-radius:14px 14px 0 0;
+    border-bottom:none; box-shadow:0 -6px 18px rgba(32,55,79,.18); z-index:40;
+  }
   .receipt-title{
     font-family:'IBM Plex Mono',monospace; font-size:11px; letter-spacing:.12em; text-transform:uppercase;
     color:var(--ink-soft); display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;
@@ -354,6 +361,12 @@
   .stat-card .k{font-family:'IBM Plex Mono',monospace; font-size:10.5px; text-transform:uppercase; letter-spacing:.08em; color:var(--ink-soft);}
   .stat-card .v{font-family:'IBM Plex Mono',monospace; font-size:19px; font-weight:700; margin-top:3px;}
 
+  .month-header{
+    font-family:'IBM Plex Mono',monospace; font-size:12px; font-weight:700; text-transform:uppercase;
+    letter-spacing:.08em; color:var(--ink-soft); margin:18px 0 8px; padding-bottom:4px;
+    border-bottom:1px dashed var(--line);
+  }
+  .month-header:first-child{margin-top:0;}
   .day-card{
     background:#fff; border:1px solid var(--line); border-radius:10px; margin-bottom:10px; overflow:hidden;
   }
@@ -513,7 +526,7 @@
     font-size:11.5px; color:var(--ink-soft); cursor:pointer; font-family:'IBM Plex Mono',monospace;
   }
 
-  .admin-row{display:flex; gap:8px; margin-top:8px;}
+  .admin-row{display:flex; gap:8px; margin:10px 0 18px;}
   .admin-row button{
     flex:1; padding:11px; border-radius:9px; font-weight:600; font-size:12.5px; cursor:pointer;
     font-family:'IBM Plex Sans Thai',sans-serif; border:1px solid var(--line); background:#fff;
@@ -755,6 +768,12 @@ function formatHistoryDate(dateKey){
   if(isNaN(d.getTime())) return dateKey;
   return d.toLocaleDateString('th-TH', {day:'numeric', month:'short', year:'numeric'});
 }
+/* Formats a "YYYY-MM-DD" date key into a Thai month/year group header, e.g. "กันยายน 2569". */
+const THAI_MONTH_FULL_NAMES = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
+function thaiMonthYear(dateKeyStr){
+  const [y,m] = dateKeyStr.split('-').map(Number);
+  return `${THAI_MONTH_FULL_NAMES[m-1]} ${y+543}`;
+}
 
 function renderRestockHistoryHtml(id){
   const rows = restockHistoryCache[id];
@@ -916,7 +935,7 @@ function renderSell(){
   const cartIds = Object.keys(cart).filter(id=>cart[id]>0);
   const total = cartIds.reduce((s,id)=> s + cart[id]*PRODUCTS.find(p=>p.id===id).price, 0);
 
-  html += `<div class="receipt">
+  html += `<div class="receipt ${cartIds.length?'pinned':''}">
     <div class="receipt-title"><span>รายการที่เลือก</span>${cartIds.length?'<button id="clearCart">ล้าง</button>':''}</div>
     ${cartIds.length===0 ? '<div class="cart-empty">แตะสินค้าด้านบนเพื่อเพิ่ม</div>' : cartIds.map(id=>{
       const p = PRODUCTS.find(x=>x.id===id);
@@ -935,6 +954,15 @@ function renderSell(){
   </div>`;
 
   el.innerHTML = html;
+
+  // When the cart is pinned to the bottom of the viewport, reserve that much
+  // space under the product grid so its last row isn't hidden behind it.
+  const receiptEl = el.querySelector('.receipt');
+  if (receiptEl && receiptEl.classList.contains('pinned')){
+    requestAnimationFrame(()=>{ el.style.paddingBottom = receiptEl.offsetHeight + 16 + 'px'; });
+  } else {
+    el.style.paddingBottom = '';
+  }
 
   el.querySelectorAll('.item-btn').forEach(b=>{
     b.addEventListener('click', ()=>{
@@ -1065,6 +1093,11 @@ function renderSummary(){
       });
     }
   } else {
+    html += `<div class="admin-row">
+      <button class="edit-btn" id="editDataBtn">แก้ไขข้อมูล</button>
+      <button class="clear-btn" id="clearDataBtn">ลบข้อมูล</button>
+    </div>`;
+
     const byDay = {};
     transactions.forEach(t=>{
       if(!byDay[t.dateKey]) byDay[t.dateKey] = {label:t.dateLabel, total:0, items:{}};
@@ -1080,7 +1113,13 @@ function renderSummary(){
     if(days.length===0){
       html += `<div class="empty-note">ยังไม่มีรายการขาย</div>`;
     } else {
+      let lastMonth = null;
       days.forEach(dk=>{
+        const monthKey = dk.slice(0,7);
+        if (monthKey !== lastMonth){
+          html += `<div class="month-header">${thaiMonthYear(dk)}</div>`;
+          lastMonth = monthKey;
+        }
         const d = byDay[dk];
         const open = openDay===dk;
         const daySales = transactions.filter(t=>t.dateKey===dk).sort((a,b)=>a.ts.localeCompare(b.ts));
@@ -1141,11 +1180,6 @@ function renderSummary(){
       html += `<div class="report-row report-grand"><span class="rn">รวมทั้งหมด</span><span class="rq"></span><span class="rv">฿${grandTotal}</span></div>`;
       html += `</div>`;
     }
-
-    html += `<div class="admin-row">
-      <button class="edit-btn" id="editDataBtn">แก้ไขข้อมูล</button>
-      <button class="clear-btn" id="clearDataBtn">ลบข้อมูล</button>
-    </div>`;
   }
 
   el.innerHTML = html;
